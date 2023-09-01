@@ -1,0 +1,1 @@
+export { HttpExecptionFilter } from './catchError'
