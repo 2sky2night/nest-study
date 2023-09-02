@@ -9,11 +9,11 @@ import {HttpExecptionFilter} from './filters'
 async function bootstrap () {
   // 使用根应用来创建http服务
   const app = await NestFactory.create(AppModule);
-  // 注册全局过滤器
-  app.useGlobalFilters(new HttpExecptionFilter())
   // 注册全局拦截器
   app.useGlobalInterceptors(new Response())
   app.useGlobalInterceptors(new AppLogger())
+  // 注册全局过滤器
+  app.useGlobalFilters(new HttpExecptionFilter())
   // app.useGlobalInterceptors(new ErrorsInterceptor())
   app.setGlobalPrefix('/api')
   await app.listen(3000);

@@ -1,1 +1,1 @@
-export { HttpExecptionFilter } from './catchError'
+export { HttpExecptionFilter } from './http-execption-filter'

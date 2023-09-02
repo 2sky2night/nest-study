@@ -4,7 +4,11 @@ https://docs.nestjs.cn/10/controllers
 
 https://juejin.cn/post/7002176233115123725nest.js
 
-集成sequlize:https://docs.nestjs.cn/10/techniques?id=sequelize-%e9%9b%86%e6%88%90
+集成sequlize:
+
+https://docs.nestjs.cn/10/techniques?id=sequelize-%e9%9b%86%e6%88%90
+
+https://nestjs.bootcss.com/recipes/sql-sequelize
 
 # 零、环境搭建
 
@@ -141,7 +145,58 @@ bootstrap();
 
 ```
 
+## 文件结构
 
+nodejs
+├── package.json
+├── README.md
+├── src
+│   │   └── constants（全局常量定义）
+│   │       ├──common.constants.ts
+│   │   └── utils（常用工具类）
+│   │       ├──http.util.ts
+│   │       └──file.util.ts
+│   ├── app.module.ts（模块配置文件）
+│   ├── common （通用模块，包含自定义装饰器、过滤器、守卫、拦截器、中间件）
+│   │   ├── decorators （项目通用装饰器）
+│   │   │   └── roles.decorator.ts
+│   │   ├── filters （过滤器）
+│   │   │   └── http-exception.filter.ts
+│   │   ├── guards （守卫）
+│   │   │   └── roles.guard.ts
+│   │   ├── interceptors （拦截器）
+│   │   │   ├── exception.interceptor.ts
+│   │   │   ├── logging.interceptor.ts
+│   │   ├── middleware （中间件）
+│   │   │   └── logger.middleware.ts
+│   │   └── pipes （管道，主要用于数据验证和类型转换）
+│   │       ├── parse-int.pipe.ts
+│   │       └── validation.pipe.ts
+│   ├── config （配置文件信息）
+│   │   ├── database.ts
+│   │   ├── redis.ts
+│   ├── jobs （高并发场景下队列处理）
+│   ├── main.ts （入口文件）
+│   ├── modules （业务代码，按目录区分模块）
+│   │   ├── hello
+│   │   │   ├── hello.controller.ts
+│   │   │   ├── hello.module.ts
+│   │   │   └── hello.service.ts
+│   │   └── users
+│   │   │   ├── dto （数据传输对象定义）
+│   │   │   │   └── users.create.dto.ts
+│   │   │   │   └── users.update.dto.ts
+│   │       ├── users.controller.ts （控制层）
+│   │       ├── users.entity.ts （映射数据库模型对象）
+│   │       ├── users.module.ts (模块定义）
+│   │       └── users.service.ts （service层）
+│   ├── tasks （定时任务）
+│   │   ├── tasks.module.ts
+│   │   └── tasks.service.ts
+│   └── templates （页面模板）
+├── test （单元测试）
+│   ├── app.e2e-spec.ts
+├── tsconfig.json
 
 # 一、控制层
 
@@ -290,7 +345,7 @@ Header装饰器可以快速的给响应头部注入内容
   }
 ```
 
-## 7.响应处理和拦截器
+## 7.响应处理之拦截器与过滤器
 
 ### 拦截器
 
@@ -545,7 +600,41 @@ export class HttpExceptionFilter implements ExceptionFilter {
   }
 }
 
+或
+// src/filter/http-execption.filter.ts
 
+// src/filter/http-execption.filter.ts
+
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+
+@Catch(HttpException)
+export class HttpExecptionFilter implements ExceptionFilter {
+  catch(exception: HttpException, host: ArgumentsHost) {
+    // 获取上下文
+    const ctx = host.switchToHttp();
+    // 获取响应response
+    const response = ctx.getResponse<Response>();
+    // 获取请求request
+    const request = ctx.getRequest<Request>()
+    // 获取状态码
+    const status = exception.getStatus();
+    // 获取异常的消息
+    const message = exception.message;
+
+    response.status(status).json({
+      code: status,
+      msg: message,
+      path: request.path,
+      timestamp:Date.now()
+    });
+  }
+}
 ```
 
 ###### 在业务失败时执行错误，让过滤器捕获
@@ -926,8 +1015,863 @@ app.use(logger);
 await app.listen(3000);
 ```
 
-## 10.守卫
+## 10.守卫（路由鉴权）
 
-​	守卫和前端路由守卫一样，可以拦截一些非法请求接口，例如未登录不能请求该接口...
+​	守卫和前端路由守卫一样，可以拦截一些非法请求接口，例如未登录不能请求该接口...，其基本作用就是在执行路由处理函数之前需要做的事情，其实我感觉就是把中间件细分出来守卫的概念，比如说还有拦截器也是同理，在执行前需要做的操作。
+
+​	守卫的执行时机：**守卫在每个中间件之后执行（意味着可以在中间件中解析token保存在上下文中，守卫可以对请求的用户进行鉴权）**，但在任何拦截器或管道之前执行。
 
 https://www.ddhigh.com/2019/08/27/nestjs-guard.html
+
+....
+
+
+
+## 11.管道（解析和校验参数）
+
+​	管道是作用在控制层中用来校验输入数据的类型或对输入数据进行类型转换。可以对路由处理函数的参数（查询参数、路径参数、请求体数据）进行验证。验证成功执行处理函数，验证失败响应错误信息。
+
+`Nest` 自带九个开箱即用的管道，即
+
+- `ValidationPipe`
+- `ParseIntPipe`
+- `ParseFloatPipe`
+- `ParseBoolPipe`
+- `ParseArrayPipe`
+- `ParseUUIDPipe`
+- `ParseEnumPipe`
+- `DefaultValuePipe`
+- `ParseFilePipe`
+
+若不使用管道我们可能就需要使用中间件或在处理函数内部进行校验，如：
+
+```ts
+  @Get('find')
+  async findUser(@Query() query: UserFindDto) {
+    if (query.id === undefined) {
+      throw new BadRequestException('未携带参数!')
+    }
+    if (isNaN(+query.id)) {
+      throw new BadRequestException('参数非法!')
+    }
+    return await this.userService.findUser(+query.id)
+  }
+```
+
+使用管道优化参数校验：
+
+@Query装饰器不仅可以获取req.query，还可以单独解析出某个属性，第一个参数就是指定要解析的参数，第二个是校验管道，解析成整数，解析成功就执行处理函数，解析失败就返回错误信息，阻止执行处理函数。
+
+```ts
+  @Get('find')
+  // 使用管道来解析参数，解析成功执行处理函数，解析失败响应错误信息
+  async findUser(@Query('id', ParseIntPipe) id: number) {
+    return await this.userService.findUser(id)
+  }
+  @Delete('remove/:id')
+  // 使用管道来解析路径参数，解析成功执行处理函数，解析失败响应错误信息
+  async removeUser(@Param('id', ParseIntPipe) id: number) {
+    return await this.userService.removeUser(id)
+  }
+```
+
+### 1.校验对象类型的数据
+
+​	上述是简单的单一数据校验，对于一般的Post请求都需要校验整个DTO。我们采用类校验器来校验处理函数中的DTO。
+
+#### 安装依赖
+
+```shell
+$ npm i --save class-validator class-transformer
+```
+
+#### 编写管道
+
+​	其实用Nest内置ValidationPipe管道一样可以完成校验请求体表单，不过不能自定义错误信息了。
+
+```ts
+import { PipeTransform, Injectable, ArgumentMetadata, BadRequestException } from '@nestjs/common';
+import { validate } from 'class-validator';
+import { plainToInstance } from 'class-transformer';
+
+@Injectable()
+export class ValidationPipe implements PipeTransform<any> {
+  async transform(value: any, { metatype }: ArgumentMetadata) {
+    if (!metatype || !this.toValidate(metatype)) {
+     // 如果没有传入验证规则，则不验证，直接返回数据
+      return value;
+    }
+    // object为传入的表单值（请求体或装饰的目标参数）
+    const object = plainToInstance(metatype, value);
+    // 通过值去校验表单
+    const errors = await validate(object);
+
+    // 出现错误了
+    if (errors.length > 0) {
+      if (errors[0].constraints) {
+        // 获取校验失败的原因
+        const tips = Object.values(errors[0].constraints)[0]
+        throw new BadRequestException(`表单校验失败:${tips}`);
+      } else {
+        throw new BadRequestException('表单校验失败!')
+      }
+    }
+    return value;
+  }
+
+  private toValidate(metatype: Function): boolean {
+    const types: Function[] = [String, Boolean, Number, Array, Object];
+    return !types.includes(metatype);
+  }
+}
+
+```
+
+#### 编写处理函数的DTO
+
+```ts
+import { Max, Min, IsString, IsNotEmpty, Length } from 'class-validator'
+// Max、Min 是数字大小相关,不是字符串长度！
+
+export class UserCreateDto {
+  @IsString({ message: '用户名为一个字符串!' })
+  @IsNotEmpty({ message: '用户名不能为空!' })
+  @Length(1, 10, { message: '用户名字段长度为1-10!' })
+  readonly username: string;
+  
+  @IsString({ message: '密码为一个字符串!' })
+  @IsNotEmpty({ message: '密码不能为空!' })
+  @Length(6, 14, { message: '密码字段长度为6-14!' })
+  readonly password: string;
+}
+```
+
+#### 使用管道，通过DTO来校验表单
+
+```ts
+  @Post('add')
+  // 通过管道+DTO来校验请求体数据
+  async createUser(@Body(new ValidationPipe()) body: UserCreateDto): Promise<any> {
+    return await this.userService.createUser(body)
+  }
+```
+
+
+
+### 2.自定义管道
+
+​	上述例子就是通过**自定义管道实现校验请求体参数**。不过在有的时候我们也想去校验query参数或params参数，但Nest内置的管道不符合需求，就需要自己定义一个管道了。**transform可以是一个异步的函数，意味着我们甚至可以在这里去操作DB，例如删除用户前，查询用户是否存在**
+
+#### 定义管道
+
+```ts
+import { ArgumentMetadata, BadRequestException, PipeTransform } from "@nestjs/common";
+
+
+export class PagePipe implements PipeTransform<string, number> {
+  // PipeTransform接收两个泛型，第一个是管道入参类型，第二个是管道解析后返回的类型
+  transform(value: any, metadata: ArgumentMetadata) {
+    console.log(value, metadata);
+    // value 是绑定的参数传入的数据
+    // metadata 包含了该参数被装饰时的信息例如，装饰的是请求体？查询参数，路径参数等，data为装饰的形参名称
+    const page = Number(value)
+    if (isNaN(page)) {
+      throw new BadRequestException('页码非法!')
+    }
+    if (page < 1) {
+      throw new BadRequestException('页码必须大于等于1')
+    }
+    return page
+  }
+}
+```
+
+#### 使用
+
+```ts
+  @Get('pipe')
+  testPipe(@Query('page',new PagePipe()) page:number) {
+    return page
+  }
+```
+
+## 12.过滤器（捕获错误）
+
+
+
+## 13.拦截器（统一响应内容）
+
+# 二、服务层
+
+## 1.一个基础的service
+
+​	服务层负责执行接口的真正业务逻辑，并将结果返回给控制层，其核心就是操作数据库。
+
+```ts
+import { Injectable } from "@nestjs/common";
+
+@Injectable()
+export class StudentService{
+  getStudentList() {
+    return [
+      {
+        name: '张三',
+        age: 18
+      },
+      {
+        name: '李四',
+        age: 20
+      }
+    ]
+  }
+}
+```
+
+**注入给控制层**
+
+```ts
+import { Module } from "@nestjs/common";
+import { StudentController } from "./student.controller";
+import { StudentService } from "./student.service";
+
+/**
+ * 学生根模块
+ */
+@Module({
+  providers:[StudentService],
+  controllers:[StudentController]
+})
+export class StudentModule{}
+```
+
+还需要给控制层挂载服务层，作为实例的属性。
+
+```ts
+import { Body, Controller, Get, Ip, Query, Res, NotFoundException, Post, HttpCode, Headers, Header, Param } from "@nestjs/common";
+import { StudentService } from "./student.service";
+import { NextFunction, Response, query } from "express";
+import { CreateStudentDto } from "./student.dto";
+
+@Controller('student')
+export class StudentController {
+    // 将服务层实例化
+  constructor(private readonly studentServiceImp: StudentService) { }
+}
+
+```
+
+# 三、数据库
+
+​	主要介绍Nest.js集成sequlize，数据库驱动为mysql2。
+
+## 1.集成nest-sequlize
+
+​	nest内置有集成seqluze的，所以用这种更方便。
+
+### 1.搭建连接数据库环境
+
+1.1需要先项目中安装依赖:
+
+```shell
+$ npm install --save @nestjs/sequelize sequelize sequelize-typescript mysql2
+$ npm install --save-dev @types/sequelize
+```
+
+2.在app.module.ts中，在模块中导入数据库驱动，注册为模块，将sequlize注入到所有模块中。
+
+```ts
+import { Module } from '@nestjs/common';
+import { SequelizeModule } from '@nestjs/sequelize';
+
+@Module({
+  imports: [
+    SequelizeModule.forRoot({
+      // 选择连接的数据库驱动
+      dialect: 'mysql',
+      // 主机
+      host: 'localhost',
+      port: 3306,
+      username: 'root',
+      password: 'root',
+      // 选择连接的数据库
+      database: 'test',
+      // 
+      models: [],
+    }),
+  ],
+})
+export class AppModule {}
+
+```
+
+3.这样所有的模型层都可以通过this访问sequlize对象了。
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { Sequelize } from 'sequelize-typescript';
+
+@Injectable()
+export class AppService {
+  constructor(private sequelize: Sequelize) {}
+}
+```
+
+### 2.sequlize-typescript快速入门
+
+https://github.com/Haochen2499/sequelize-typescript-doc-zh
+
+https://github.com/sequelize/sequelize-typescript#column
+
+​	由于之前学习的是sequlize，在sequelize-typescript中大部分模型字段声明、关系声明都是用的装饰器。
+
+### 3.简单实例
+
+#### 3.1创建一个模型
+
+```ts
+import { Column, Comment, Model, Table, PrimaryKey, AutoIncrement, DataType } from 'sequelize-typescript';
+
+/**
+ * 用户模型
+ */
+@Table
+export class User extends Model<User> {
+  // colunm装饰器必须在最下面，否则一直报错
+  @PrimaryKey
+  @AutoIncrement
+  @Comment('用户id')
+  @Column(DataType.INTEGER)
+  user_id: number;
+
+  @Comment('用户名称')
+  @Column
+  username: string;
+  
+  @Comment('用户密码')
+  @Column
+  password: string;
+}
+
+```
+
+#### 3.2注册模型
+
+​	让Sequlize知道需要控制该表，若数据库下不存在该表，会创建该表，然后还需要在对应模块中注入该模型才能使用。
+
+```ts
+import { SequelizeModule } from '@nestjs/sequelize';
+// 用户模型
+import { User } from './modules/user/user.model';
+// 根模块，注册所有模块
+@Module({
+  // 路由模块通过imports中注册
+  imports: [
+    StudentModule,
+    FileModule,
+    SequelizeModule.forRoot({
+      dialect: 'mysql',
+      host: 'localhost',
+      port: 3306,
+      username: 'root',
+      password: '1234',
+      database: 'nest-study',
+      models: [
+        User
+      ]
+    })
+  ],
+//....
+})
+export class AppModule {}
+
+```
+
+同时，哪个模块需要使用到该模型就需要通过模块中注入该模型，这样服务层才能通过注入的模型操作数据库
+
+```ts
+import { Module } from "@nestjs/common";
+import { SequelizeModule } from "@nestjs/sequelize";
+import { User } from "./user.model";
+
+@Module({
+  // 将用户模型注入到user模块中
+  imports:[SequelizeModule.forFeature([User])],
+  providers:[],
+  controllers:[]
+})
+export class UserModle {}
+```
+
+最后，在服务层中实例化该模型，就能愉快的DB操作啦~
+
+```ts
+import { Injectable } from "@nestjs/common";
+import { InjectModel } from "@nestjs/sequelize";
+import { User } from "./user.model";
+
+@Injectable()
+export class UserService {
+  // 注入模型,服务层的各个方法都能访问该模型了
+  constructor(
+    @InjectModel(User) private userModel:typeof User
+  ) { }
+  
+}
+```
+
+
+
+## 2.使用Provider手动驱动数据库
+
+​	不使用nest-sequlize，我们可以通过原生sequlize+Nest的依赖注入方式来操作DB
+
+### 2.1 数据库连接准备
+
+#### 创建提供者
+
+​	创建提供者，每个提供者都需要实现**useFactory**方法和provide属性（作为id）
+
+```ts
+// database.provider.ts
+import { Provider } from "@nestjs/common"
+import { Sequelize } from "sequelize-typescript"
+import { User } from "src/modules/user/user.model"
+
+export const databaseProviders:Provider[] = [
+  {
+    provide: 'SEQUELIZE',
+    async useFactory() {
+      // 建立连接
+      const sequelize = new Sequelize({
+        dialect: 'mysql',
+        host: 'localhost',
+        port: 3306,
+        username: 'root',
+        password: '1234',
+        database: 'nest-study',
+        
+      })
+      // 添加模型
+      sequelize.addModels([
+        User
+      ])
+      // 创建表
+      await sequelize.sync({
+        alter:true 
+      })
+      return sequelize
+    }
+  }
+]
+```
+
+#### 创建数据库模块
+
+```ts
+// database.module.ts
+import { Module } from "@nestjs/common";
+import { databaseProviders } from "./database.providers";
+
+@Module({
+  providers: [...databaseProviders],
+  // 导出数据库提供者，导入该模块时就能使用数据库提供者了。
+  exports:[...databaseProviders]
+})
+export class DatabaseModule { }
+```
+
+### 2.2 模块需要做的准备
+
+#### 1.创建模型提供者
+
+​	模型提供者主要是为了能够让模块能够使用该模型，操作DB。
+
+```ts
+// user.providers.ts
+import { User } from "./user.model";
+
+export const userProviders = [
+  {
+    provide: 'UserRepository',
+    useValue: User
+  }
+]
+```
+
+#### 2.导入数据库模块和模型提供者
+
+​	导入数据库模块主要是为了，建立模型和创建表，**其实数据库模块可以在根模块中导入注册**。
+
+​	**注意**，一定要导入模型提供者，这样提供了依赖，服务层才能被注入模型实例。
+
+```ts
+import { Module } from "@nestjs/common";
+import { UserService } from "./user.service";
+import { UserController } from "./user.controller";
+import { DatabaseModule } from "src/database/database.module";
+import { userProviders } from "./user.providers";
+
+@Module({
+  imports: [DatabaseModule],
+  providers: [UserService, ...userProviders],
+  controllers: [UserController]
+})
+export class UserModle { }
+```
+
+##### 实例化模型
+
+```ts
+import { Inject, Injectable } from "@nestjs/common";
+import { InjectModel } from "@nestjs/sequelize";
+import { User } from "./user.model";
+
+@Injectable()
+export class UserService {
+  constructor(
+    // 由于userProviders提供了该依赖，所以可以使用Inject将模型注入进来
+    @Inject('UserRepository') private readonly userRepository:typeof User
+  ){}
+  async findAll() {
+    return await this.userRepository.findAll()
+  }
+}
+```
+
+## 3.简单案例
+
+### 模型
+
+```ts
+import { Column, Comment, Model, Table, PrimaryKey, AutoIncrement, DataType } from 'sequelize-typescript';
+
+/**
+ * 用户模型
+ */
+@Table({
+  modelName: 'user',
+  tableName: 'user'
+})
+export class User extends Model<User> {
+  // colunm装饰器必须在最下面，否则一直报错
+  @PrimaryKey
+  @AutoIncrement
+  @Comment('用户id')
+  @Column(DataType.INTEGER)
+  user_id: number;
+
+  @Comment('用户名称')
+  @Column
+  username: string;
+
+  @Comment('用户密码')
+  @Column
+  password: string;
+
+  @Column
+  updatedAt: Date;
+
+  @Column
+  createdAt: Date;
+}
+
+```
+
+### 服务层
+
+```ts
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { InjectModel } from "@nestjs/sequelize";
+import { User } from "./user.model";
+import { UserCreateDto } from "./dto/user.create.dto";
+
+@Injectable()
+export class UserService {
+  constructor(
+    @Inject('UserRepository') private readonly userRepository: typeof User
+  ) { }
+  async findAll() {
+    return await this.userRepository.findAll()
+  }
+  async createUser(userInfo: UserCreateDto) {
+    // 查询用户名是否重复
+    const user = await this.findUserByUsername(userInfo.username)
+    if (user !== null) {
+      // 用户名重复!
+      throw new BadRequestException('用户名重复!')
+    }
+    // 插入用户记录
+    const userIns = new User()
+    userIns.set('username', userInfo.username)
+    userIns.set('password', userInfo.password)
+    await userIns.save()
+    return '注册成功!'
+  }
+  async findUserByUsername(username: string) {
+    // 通过username查询某个用户名称是否存在
+    const user = await this.userRepository.findOne({
+      where: {
+        username
+      }
+    })
+    return user
+  }
+  async findUser(user_id: number) {
+    const user = await this.userRepository.findByPk(user_id)
+    if (user) {
+      return user
+    } else {
+      throw new NotFoundException('此用户id不存在!')
+    }
+  }
+  async removeUser(user_id: number) {
+    const user = await this.findUser(user_id)
+    await user.destroy()
+    return '删除用户成功'
+  }
+  async updateUser(user_id: number, { username, password }: { username: string, password: string }) {
+    const user = await this.findUser(user_id)
+    // 直接更新
+    user.username=username
+    user.password = password
+    await user.save()
+    return user
+  }
+}
+```
+
+### 控制层
+
+```ts
+import { Controller, Get, Post, Body, BadRequestException, Query, Delete, ParseIntPipe, UsePipes, Param, Put } from "@nestjs/common";
+import { UserService } from "./user.service";
+import { UserCreateDto } from "./dto/user.create.dto";
+import { ValidationPipe } from "./pipe/validation.pipe";
+import { PagePipe } from "./pipe/pageValidation.pipe";
+import { UserUpdateDto } from "./dto/user.update.dto";
+
+@Controller('user')
+export class UserController {
+  constructor(private userService: UserService) { }
+  @Get('list')
+  async getUserList() {
+    return await this.userService.findAll()
+  }
+  // 增
+  @Post('add')
+  // 通过管道+DTO来校验请求体数据
+  async createUser(@Body(new ValidationPipe()) body: UserCreateDto): Promise<any> {
+    return await this.userService.createUser(body)
+  }
+  // 查
+  @Get('find')
+  // 使用管道来解析参数，解析成功执行处理函数，解析失败响应错误信息
+  async findUser(@Query('id', ParseIntPipe) id: number, @Query('name') name: string) {
+    return await this.userService.findUser(id)
+  }
+  // 删
+  @Delete('remove/:id')
+  // 使用管道来解析路径参数，解析成功执行处理函数，解析失败响应错误信息
+  async removeUser(@Param('id', ParseIntPipe) id: number) {
+    return await this.userService.removeUser(id)
+  }
+  // 更新
+  @Put('update/:id')
+  async updateUser(@Param('id', ParseIntPipe) user_id: number, @Body(new ValidationPipe()) userUpdateDto: UserUpdateDto) {
+    return await this.userService.updateUser(user_id, userUpdateDto)
+  }
+  @Get('pipe')
+  testPipe(@Query('page', new PagePipe()) page: number) {
+    return page
+  }
+}
+```
+
+### 提供者
+
+提供模型，让当前模块都能使用该模型
+
+```ts
+import { User } from "./user.model";
+
+export const userProviders = [
+  {
+    provide: 'UserRepository',
+    useValue: User
+  }
+]
+```
+
+### 模块
+
+```ts
+import { Module } from "@nestjs/common";
+import { UserService } from "./user.service";
+import { UserController } from "./user.controller";
+import { userProviders } from "./user.providers";
+
+@Module({
+  imports: [],
+  providers: [UserService, ...userProviders],
+  controllers: [UserController]
+})
+export class UserModle { }
+```
+
+### 根模块
+
+```ts
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { StudentModule } from './modules/student/student.module';
+import { LogMiddleware, TestMiddleware } from './middleware';
+import { StudentController } from './modules/student/student.controller';
+import { FileModule } from './modules/file/file.module';
+import { SequelizeModule } from '@nestjs/sequelize';
+import { DatabaseModule } from "./database/database.module";
+
+// 用户模型
+import { User } from './modules/user/user.model';
+import { UserModle } from './modules/user/user.module';
+// 根模块，注册所有模块
+@Module({
+  // 路由模块通过imports中注册
+  imports: [
+    UserModle,
+    DatabaseModule
+  ],
+})
+export class AppModule  {}
+
+```
+
+### 数据库模块
+
+```ts
+import { Module } from "@nestjs/common";
+import { databaseProviders } from "./database.providers";
+
+@Module({
+  providers: [...databaseProviders],
+  exports:[...databaseProviders]
+})
+export class DatabaseModule { }
+```
+
+```ts
+import { Provider } from "@nestjs/common"
+import { Sequelize } from "sequelize-typescript"
+import { User } from "src/modules/user/user.model"
+
+export const databaseProviders:Provider[] = [
+  {
+    provide: 'SEQUELIZE',
+    async useFactory() {
+      // 建立连接
+      const sequelize = new Sequelize({
+        dialect: 'mysql',
+        host: 'localhost',
+        port: 3306,
+        username: 'root',
+        password: '1234',
+        database: 'nest-study',
+        
+      })
+      // 添加模型
+      sequelize.addModels([
+        User
+      ])
+      // 创建表
+      await sequelize.sync({
+        alter:true 
+      })
+      return sequelize
+    }
+  }
+]
+```
+
+
+
+# 四、模块
+
+Nest中使用Module装饰器来修饰一个模块。
+
+`@module()` 装饰器接受一个描述模块属性的对象：
+
+|             |                                                            |
+| ----------- | ---------------------------------------------------------- |
+| providers   | 由 Nest 注入器实例化的提供者，并且可以至少在整个模块中共享 |
+| controllers | 必须创建的一组控制器                                       |
+| imports     | 导入模块的列表，这些模块导出了此模块中所需提供者           |
+| exports     | 由本模块提供并应在其他模块中可用的提供者的子集。           |
+
+https://docs.nestjs.cn/10/modules
+
+## 1.Providers
+
+
+
+## 2.Controllers
+
+
+
+## 3.imports
+
+​	imports接收一个数组，数组中每个元素都是一个模块，代表着导入该模块。这样模块就能使用导入模块的功能了。
+
+## 4.exports
+
+​	exports可以导出任意内容，导出后，其他模块在导入该模块时候就能使用导出的内容了。
+
+### **共享模块**:
+
+​	直接导出CatsService，这样只要导入CatsModule的模块都能访问到CatsService了。
+
+```ts
+import { Module } from '@nestjs/common';
+import { CatsController } from './cats.controller';
+import { CatsService } from './cats.service';
+
+@Module({
+  controllers: [CatsController],
+  providers: [CatsService],
+  exports: [CatsService]
+})
+export class CatsModule {}
+
+```
+
+### **模块导出**:
+
+直接导出该模块，这样导入CoreModule的模块就能使用CoreModule暴露的内容了。
+
+```ts
+@Module({
+  imports: [CommonModule],
+  exports: [CommonModule],
+})
+export class CoreModule {}
+```
+
+### 全局模块
+
+​	通过@Gobal修饰全局模块，只要导入一次该模块，就能在所有模块中访问该模块导出的内容了。
+
+```ts
+import { Module, Global } from '@nestjs/common';
+import { CatsController } from './cats.controller';
+import { CatsService } from './cats.service';
+
+@Global()
+@Module({
+  controllers: [CatsController],
+  providers: [CatsService],
+  exports: [CatsService],
+})
+export class CatsModule {}
+
+```
+
+`@Global` 装饰器使模块成为全局作用域。 全局模块应该只注册一次，最好由根或核心模块注册。 在上面的例子中，`CatsService` 组件将无处不在，而想要使用 `CatsService` 的模块则不需要在 `imports` 数组中导入 `CatsModule`。

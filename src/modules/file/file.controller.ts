@@ -49,15 +49,13 @@ export class FileController {
     const rootPath = resolve('./src/static/file')
     // filename为下载时的文件名称
     res.setHeader('Content-Disposition', "attachment;filename=" + '1.png')
-    //第二个参数配置项 highWaterMark 最高水位线,默认最多读取64K,这里设置每次读取1b
-    const fileStream = createReadStream(resolve(rootPath, './1.png'), { highWaterMark: 1 })
+    //第二个参数配置项 highWaterMark 最高水位线,默认最多读取64K,这里设置每次读取10kb
+    const fileStream = createReadStream(resolve(rootPath, './1.png'), { highWaterMark: 1024*10 })
     const buffer = await new Promise<Buffer>(r => {
       // 保存buffer流片段
       const arrBuffer: Buffer[] = []
       fileStream.on('data', (chunk: Buffer) => {
         // 以流的方式读取文件，每次读取保存一段数据
-        console.log(chunk.length);
-        
         arrBuffer.push(chunk)
       })
       fileStream.on('end', () => {
