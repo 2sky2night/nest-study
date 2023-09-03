@@ -10,15 +10,17 @@ import { DatabaseModule } from "./database/database.module";
 
 // 用户模型
 import { User } from './modules/user/user.model';
-import { UserModle } from './modules/user/user.module';
+import { UserModule } from './modules/user/user.module';
+import { PostModule } from './modules/post/post.module';
 // 根模块，注册所有模块
 @Module({
   // 路由模块通过imports中注册
   imports: [
     StudentModule,
     FileModule,
-    UserModle,
-    DatabaseModule
+    UserModule,
+    DatabaseModule,
+    PostModule
   ],
   // 控制层在这里注册
   controllers: [AppController],

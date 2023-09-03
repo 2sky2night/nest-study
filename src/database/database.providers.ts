@@ -1,5 +1,7 @@
 import { Provider } from "@nestjs/common"
 import { Sequelize } from "sequelize-typescript"
+import { Post } from "src/modules/post/post.model"
+import { PostLike } from "src/modules/post/postLike.model"
 import { User } from "src/modules/user/user.model"
 
 export const databaseProviders:Provider[] = [
@@ -18,7 +20,7 @@ export const databaseProviders:Provider[] = [
       })
       // 添加模型
       sequelize.addModels([
-        User
+        User,Post,PostLike
       ])
       // 创建表
       await sequelize.sync({

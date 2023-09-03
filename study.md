@@ -333,7 +333,7 @@ Header装饰器可以快速的给响应头部注入内容
   }
 ```
 
-## 6.路由参数(动态路径)
+## 6.路由路径参数(动态路径)
 
 ​	通过配置路径参数，就可以达成不同路径执行相同处理函数的功能。
 
@@ -1025,7 +1025,7 @@ https://www.ddhigh.com/2019/08/27/nestjs-guard.html
 
 ....
 
-
+**守卫的案例在14、15中有说明。**
 
 ## 11.管道（解析和校验参数）
 
@@ -1200,6 +1200,653 @@ export class PagePipe implements PipeTransform<string, number> {
 
 
 ## 13.拦截器（统一响应内容）
+
+
+
+## 14.token鉴权
+
+https://nest.nodejs.cn/security/authentication，案例说最好将登陆注册和用户操作分离出来。
+
+​	在登录后需要生成用户身份令牌，让用户可以访问一些需要鉴权的接口。
+
+### 注册JwtModule
+
+​	在哪个模块需要使用jwt就需要先导入Jwt模块，在导入Jwt模块时还不要忘了配置Jwt
+
+```ts
+import { Module } from "@nestjs/common";
+import { UserService } from "./user.service";
+import { UserController } from "./user.controller";
+import { userProviders } from "./user.providers";
+import { JwtModule } from '@nestjs/jwt'
+import { SECRET_KEY } from "src/utils/encrpty";
+
+@Module({
+  imports: [
+    JwtModule.register({
+      secret: SECRET_KEY,
+      signOptions: {
+        expiresIn: '2h'
+      }
+    })
+  ],
+  providers: [UserService, ...userProviders],
+  controllers: [UserController]
+})
+export class UserModle { }
+```
+
+### 登录成功时发放token
+
+```ts
+  async login({ username, password }: UserLoginDto) {
+    // 查询用户名是否存在
+    const user = await this.findUserByUsername(username)
+    if (user === null) {
+      throw new BadRequestException('用户名不存在!')
+    }
+    // 解密用户密码
+    const _password = decrpty(user.get('password'), SECRET_KEY)
+    if (_password === password) {
+      const id = user.get('user_id')
+      // 生成token，传入的参数就是加密的内容。
+      const token = await this.jwtService.signAsync({
+        sub: id,
+        username: user.username
+      })
+      return {
+        token
+      }
+    } else {
+      throw new BadRequestException('用户名或密码错误!')
+    }
+  }
+```
+
+### 鉴权接口
+
+​	在应用中，有很多接口都是需要一定权限才能访问的，若必须登录才能访问或拥有一定权限才能访问的，在以往的框架中都是使用中间件，在路由处理函数之前执行鉴权逻辑，在Nest也是一样的，使用路由守卫来完成身份鉴权的操作。
+
+#### 1.定义路由守卫
+
+​	下列只是简单案例，其实我们每次解析token时，不仅仅要看token是否被解析成功，还需要看该用户是否存在。
+
+```ts
+
+import {
+  CanActivate,
+  ExecutionContext,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { SECRET_KEY } from 'src/utils/encrpty';
+import { Request } from 'express';
+
+@Injectable()
+export class AuthGuard implements CanActivate {
+  constructor(private jwtService: JwtService) { }
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    // 获取请求头部
+    const request = context.switchToHttp().getRequest();
+    // 获取请求头部的token
+    const token = this.extractTokenFromHeader(request);
+    if (!token) {
+      throw new UnauthorizedException();
+    }
+    try {
+      // 解析token
+      const payload = await this.jwtService.verifyAsync(
+        token,
+        {
+          secret: SECRET_KEY
+        }
+      );
+      // 💡 We're assigning the payload to the request object here
+      // so that we can access it in our route handlers
+      // 将解析出来的token数据保存到上下文中
+      request['user'] = payload;
+    } catch {
+      throw new UnauthorizedException();
+    }
+    return true;
+  }
+  // 从authorization中解析token
+  private extractTokenFromHeader(request: Request): string | undefined {
+    const [type, token] = request.headers.authorization?.split(' ') ?? [];
+    return type === 'Bearer' ? token : undefined;
+  }
+}
+```
+
+#### 2.使用独享路由守卫处理接口鉴权
+
+在控制器中给需要守卫鉴权的路由处理函数就使用UseGuards来显示声明哪些路由需要鉴权。
+
+```ts
+  // 解析token
+  @UseGuards(AuthGuard)
+  @Get('token')
+  testToken(@Req() req: Request) {
+    // @ts-ignore
+    return req['user']
+  }
+```
+
+#### 3.当然也可以全局配置哪些路由不需要鉴权的
+
+​	可以看文档仔细介绍 https://nest.nodejs.cn/security/authentication
+
+```ts
+consumer
+  .apply(LoggerMiddleware)
+  .exclude(
+    { path: 'cats', method: RequestMethod.GET },
+    { path: 'cats', method: RequestMethod.POST },
+    'cats/(.*)',
+  )
+  .forRoutes(CatsController);
+```
+
+
+
+#### 4.使用中间件解析token，保存到上下文
+
+​	这种场景适用于接口**在有令牌和无令牌时返回不同内容**。
+
+##### 定义中间件
+
+```ts
+import { Injectable, NestMiddleware, UnauthorizedException } from "@nestjs/common";
+import { NextFunction, Request, Response } from "express";
+import { JwtService } from "@nestjs/jwt";
+import { SECRET_KEY } from "src/utils/encrpty";
+
+// 解析token的中间件
+// Injectable装饰器的作用可以将构造函数中的参数内容全部都注入到实例中
+@Injectable()
+export class TokenParseMiddleware implements NestMiddleware {
+  // 注入Jwt服务层,中间件也可以注入内容
+  constructor(private jwtService: JwtService) { }
+  async use(req: Request, _res: Response, next: NextFunction) {
+    console.log('中间件');
+    
+    const token = this.getTokenFromHeader(req)
+    if (token === undefined) {
+      // 无token直接放行
+      next()
+    } else {
+      // 有token，需要解析出token
+      console.log(token);
+      try {
+        const user = await this.jwtService.verifyAsync(token, { secret: SECRET_KEY })
+        // @ts-ignore
+        req['user']=user
+        next()
+      } catch (error) {
+        throw new UnauthorizedException('token非法!')
+      }
+      
+    }
+
+  }
+  private getTokenFromHeader(req: Request) {
+    const authorization = req.headers.authorization
+    if (authorization === undefined) {
+      return undefined
+    }
+    // 默认为Bearer类型的token
+    const token = authorization.split(' ')[1]
+    if (token !== undefined) {
+      return token
+    } else {
+      return undefined
+    }
+  }
+}
+```
+
+##### 注册中间件
+
+```ts
+export class UserModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(TokenParseMiddleware)
+      .forRoutes(
+        {
+          // 注意把请求路径写全,这个路径要使用中间件
+          path: '/user/publicToken',
+          method: RequestMethod.GET
+        }
+      )
+  }
+}
+```
+
+##### 控制层处理函数
+
+```ts
+  // 中间件解析token保存到上下文
+  // 有token没token都能访问，不过响应的内容不一样
+  @Get('publicToken')
+  testMiddlewareToken(@Req() req: Request) {
+    // @ts-ignore
+    const user = req.user
+    return user?user:'未携带token，给你看点公共的内容!'
+  }
+```
+
+#### 5.使用拦截器解析token，保存到上下文中
+
+定义拦截器
+
+```ts
+import { BadRequestException, CallHandler, ExecutionContext, Inject, Injectable, NestInterceptor, UnauthorizedException } from "@nestjs/common";
+import { JwtService } from "@nestjs/jwt";
+import { Observable } from "rxjs";
+import { Request } from "express";
+import { User } from "src/modules/user/user.model";
+import { SECRET_KEY } from "src/utils/encrpty";
+import { UserService } from "src/modules/user/user.service";
+
+// 要注入构造函数中的参数只有使用Injectable
+@Injectable()
+export class TokenParseInterceptor implements NestInterceptor {
+  constructor(
+    // 因为模块提供了这两个玩意，所以才能注入他们
+    private jwtService: JwtService,
+    // private userService: UserService
+    @Inject('UserRepository') private readonly userRepository: typeof User,
+  ) { }
+  async intercept(context: ExecutionContext, next: CallHandler<any>): Promise<any> {
+    // next.handle可以调用路由处理函数
+    // next.handle()
+    const req = context.switchToHttp().getRequest<Request>()
+    // 获取token
+    const token = this.getTokenFromHeaders(req)
+    // 解析token
+    if (token === undefined) {
+      // 调用路由处理函数
+      return next.handle()
+    }
+    try {
+      const playload = await this.jwtService.verifyAsync(token, { secret: SECRET_KEY })
+      // 查询用户是否存在?
+      const id = playload.sub
+      const user = await this.userRepository.findByPk(id)
+      if (user===null) {
+        throw new Error('用户不存在!')
+      }
+
+      // 将token保存到上下文中
+      // @ts-ignore
+      req['user'] = playload
+      // 调用路由处理函数
+      return next.handle()
+    } catch (error) {
+      throw new UnauthorizedException(error.toString())
+    }
+  }
+  getTokenFromHeaders(req: Request) {
+    const authorization = req.headers.authorization
+    if (authorization === undefined) {
+      return undefined
+    }
+    const token = authorization.split(' ')[1]
+    if (token === undefined) {
+      return undefined
+    } else {
+      return token
+    }
+  }
+}
+```
+
+使用拦截器
+
+```ts
+  // 拦截器解析token保存到上下文中
+  @UseInterceptors(TokenParseInterceptor)
+  @Get('token/interceptor')
+  testTokenInterceptor(@Req() req: Request) {
+    // @ts-ignore
+    return req.user ? req.user : '未携带token'
+  }
+```
+
+#### 6.在路由处理函数的上下文中获取解析出的token数据
+
+若TokenParseInterceptor的作用就是解析token并将解析出来的值保存在req.user中，那么我们每次想要在处理函数中获取该值的时候都需要手动获取，很麻烦，如：
+
+```ts
+  // 拦截器解析token保存到上下文中
+  @UseInterceptors(TokenParseInterceptor)
+  @Get('token/interceptor')
+  testTokenInterceptor(@Req() req: Request) {
+    // @ts-ignore
+    return req.user ? req.user : '未携带token'
+  }
+```
+
+##### 使用自定义装饰器获取上下文中的token
+
+```ts
+
+import { BadGatewayException, createParamDecorator, ExecutionContext } from '@nestjs/common';
+
+// 将上下文中保存的token数据拿出来
+export const Token = createParamDecorator(
+  (data: string | undefined, ctx: ExecutionContext) => {
+    // data是参数装饰器中传入的值
+    // @Token('sub') 则data==='sub'
+    const request = ctx.switchToHttp().getRequest();
+    if (data === undefined) {
+      return request.user;
+    } else {
+      const value = request.user[data]
+      if (value === undefined) {
+        throw new BadGatewayException()
+      } else {
+        return value
+      }
+    }
+  },
+)
+```
+
+##### 使用
+
+```ts
+  @UseGuards(AuthGuard)
+  @Post('create')
+  createPost(@Body(new ValidationPipe()) postCreateDto:PostCreateDto,@Token('sub') uid:number){
+    console.log(uid);
+    
+    return 'ok'
+  }
+```
+
+
+
+
+
+## 15.角色鉴权
+
+​	在应用中，会存在角色相关的操作，例如User、Admin，User只能看文章，Admin可以增删改查文章。我们可以用中间件处理，当时用了Nest就用它内置的最舒服。
+
+https://nest.nodejs.cn/security/authorization
+
+https://nest.nodejs.cn/guards
+
+### 简单案例
+
+#### 1.定义角色守卫
+
+```ts
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from "@nestjs/common";
+import { Observable } from "rxjs";
+import { Request } from "express";
+import { Reflector } from "@nestjs/core";
+
+@Injectable()
+export class RoleGuard implements CanActivate {
+  // Reflector用来访问路由元数据
+  constructor(private reflector: Reflector) { }
+  canActivate(context: ExecutionContext): boolean | Promise<boolean> | Observable<boolean> {
+    // 通过reflector读取到路由元数，读取哪些角色可以调用该路由
+    const roles = this.reflector.get<string[]>('roles', context.getHandler())
+    // 在前置的auth守卫中解析了保存到了上下文中，所以可以通过request访问到用户的token信息
+    const request = context.switchToHttp().getRequest<Request>()
+    // 获取当前用户的角色
+    // @ts-ignore
+    const { role } = request['user']
+    if (roles.includes(role)) {
+      return true
+    } else {
+      throw new ForbiddenException('无权限访问!')
+    }
+  }
+}
+```
+
+#### 2.使用守卫
+
+​	由于守卫也是中间件，我们可以先执行鉴权守卫，解析出用户数据保存在上下文中，这样角色守卫就可以获取上下文中的用户数据，并判断是否有权限访问接口了。
+
+```ts
+  // 给路由处理函数设置元数据 roles：User
+  @SetMetadata('roles', ['User'])
+  // 守卫的执行顺序按照注册的顺序来的
+  @UseGuards(AuthGuard, RoleGuard)
+  @Get('role/user')
+  testRoleUser() {
+    return 'user角色才能看的'
+  }
+  @SetMetadata('roles', ['Admin'])
+  @UseGuards(AuthGuard, RoleGuard)
+  @Get('role/admin')
+  testRoleAdmin() {
+    return '管理员才能看的'
+  }
+```
+
+#### 3.进阶用法
+
+​	我们可以把SetMetaData设置路由角色元数据的操作封装成装饰器，能让我们的代码更语义化。装饰器工厂返回的函数才是真正的功能，所以我们只需要调用Roles函数，Roles函数有返回SetMetadata函数调用后的结果就可以啦。
+
+##### 定义装饰器
+
+```ts
+// decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export const Roles = (...roles: string[]) => SetMetadata('roles', roles);
+```
+
+##### 使用装饰器
+
+```ts
+  // 给路由处理函数设置元数据 roles：User
+  // @SetMetadata('roles', ['User'])
+  @Roles('User')
+  // 守卫的执行顺序按照注册的顺序来的
+  @UseGuards(AuthGuard, RoleGuard)
+  @Get('role/user')
+  testRoleUser() {
+    return 'user角色才能看的'
+  }
+```
+
+
+
+
+
+
+
+## 16.Injectable装饰器的作用
+
+#### 注入内容
+
+Injectable装饰器的作用可以将构造函数中的参数内容全部都注入到实例中。
+
+```ts
+import { Injectable, NestMiddleware, UnauthorizedException } from "@nestjs/common";
+import { NextFunction, Request, Response } from "express";
+import { JwtService } from "@nestjs/jwt";
+import { SECRET_KEY } from "src/utils/encrpty";
+
+// 解析token的中间件
+// Injectable装饰器的作用可以将构造函数中的参数内容全部都注入到示例中
+@Injectable()
+export class TokenParseMiddleware implements NestMiddleware {
+  // 注入Jwt服务层,中间件也可以注入内容
+  constructor(private jwtService: JwtService) { }
+  async use(req: Request, _res: Response, next: NextFunction) {
+    console.log('中间件');
+    console.log();
+    
+    const token = this.getTokenFromHeader(req)
+    if (token === undefined) {
+      // 无token直接放行
+      next()
+    } else {
+      // 有token，需要解析出token
+      console.log(token);
+      try {
+        const user = await this.jwtService.verifyAsync(token, { secret: SECRET_KEY })
+        // @ts-ignore
+        req['user']=user
+        next()
+      } catch (error) {
+        throw new UnauthorizedException('token非法!')
+      }
+      
+    }
+
+  }
+  private getTokenFromHeader(req: Request) {
+    const authorization = req.headers.authorization
+    if (authorization === undefined) {
+      return undefined
+    }
+    // 默认为Bearer类型的token
+    const token = authorization.split(' ')[1]
+    if (token !== undefined) {
+      return token
+    } else {
+      return undefined
+    }
+  }
+}
+```
+
+等同于
+
+```ts
+import { Injectable, NestMiddleware, UnauthorizedException } from "@nestjs/common";
+import { NextFunction, Request, Response } from "express";
+import { JwtService } from "@nestjs/jwt";
+import { SECRET_KEY } from "src/utils/encrpty";
+
+// 解析token的中间件
+export class TokenParseMiddleware implements NestMiddleware {
+  // 注入Jwt服务层,中间件也可以注入内容
+  jwtService=new JwtService()
+  async use(req: Request, _res: Response, next: NextFunction) {
+    const token = this.getTokenFromHeader(req)
+    if (token === undefined) {
+      // 无token直接放行
+      next()
+    } else {
+      // 有token，需要解析出token
+      console.log(token);
+      try {
+        const user = await this.jwtService.verifyAsync(token, { secret: SECRET_KEY })
+        // @ts-ignore
+        req['user']=user
+        next()
+      } catch (error) {
+        console.log(error.toString());
+        if (error.toString() === 'TokenExpiredError: jwt expired') {
+          throw new UnauthorizedException('token过期，请重新登录!')
+        } else {
+          throw new UnauthorizedException('token非法!')
+        }
+      }
+      
+    }
+
+  }
+  private getTokenFromHeader(req: Request) {
+    const authorization = req.headers.authorization
+    if (authorization === undefined) {
+      return undefined
+    }
+    // 默认为Bearer类型的token
+    const token = authorization.split(' ')[1]
+    if (token !== undefined) {
+      return token
+    } else {
+      return undefined
+    }
+  }
+}
+```
+
+#### 作为提供者
+
+Injectable装饰器同时也会把被修饰的类当作提供者，在模块中注册为Provider，则该模块任意地方都能被注入该内容，使用了。
+
+依赖注入是一种 [控制反转 (IoC)](https://nest.nodejs.cn/#) 技术，其中你将依赖的实例化委托给 IoC 容器（在我们的例子中是 NestJS 运行时系统），而不是在你自己的代码中强制执行。 让我们检查 [提供商章节](https://nest.nodejs.cn/providers) 的这个示例中发生了什么。
+
+首先，我们定义一个提供者。 `@Injectable()` 装饰器将 `CatsService` 类标记为提供者。
+
+cats.service.ts
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { Cat } from './interfaces/cat.interface';
+
+@Injectable()
+export class CatsService {
+  private readonly cats: Cat[] = [];
+
+  findAll(): Cat[] {
+    return this.cats;
+  }
+}
+```
+
+然后我们请求 Nest 将提供者注入我们的控制器类：
+
+cats.controller.tsJS
+
+```typescript
+import { Controller, Get } from '@nestjs/common';
+import { CatsService } from './cats.service';
+import { Cat } from './interfaces/cat.interface';
+
+@Controller('cats')
+export class CatsController {
+  constructor(private catsService: CatsService) {}
+
+  @Get()
+  async findAll(): Promise<Cat[]> {
+    return this.catsService.findAll();
+  }
+}
+```
+
+最后，我们向 Nest IoC 容器注册提供者：
+
+app.module.tsJS
+
+```typescript
+import { Module } from '@nestjs/common';
+import { CatsController } from './cats/cats.controller';
+import { CatsService } from './cats/cats.service';
+
+@Module({
+  controllers: [CatsController],
+  providers: [CatsService],
+})
+export class AppModule {}
+```
+
+为了使这项工作成功，幕后到底发生了什么？ 整个过程分为三个关键步骤：
+
+1. `cats.service.ts` 中，`@Injectable()` 装饰器将 `CatsService` 类声明为可以被 Nest IoC 容器管理的类。
+2. 在 `cats.controller.ts` 中，`CatsController` 通过构造函数注入声明了对 `CatsService` 令牌的依赖：
+
+```typescript
+  constructor(private catsService: CatsService)
+```
+
+1. 在 `app.module.ts` 中，我们将令牌 `CatsService` 与 `cats.service.ts` 文件中的类 `CatsService` 相关联。 我们将 [见下文](https://nest.nodejs.cn/#) 确切说明这种关联（也称为注册）是如何发生的。
+
+当 Nest IoC 容器实例化一个 `CatsController` 时，它首先查找任何依赖*。 当它找到 `CatsService` 依赖时，它会根据注册步骤（上面的#3）对 `CatsService` 令牌执行查找，返回 `CatsService` 类。 假设 `SINGLETON` 作用域（默认行为），Nest 将创建 `CatsService` 的实例，缓存它并返回它，或者如果已经缓存了一个实例，则返回现有实例。
 
 # 二、服务层
 
@@ -1792,7 +2439,290 @@ export const databaseProviders:Provider[] = [
 ]
 ```
 
+## 4.数据库字段加密
 
+​	在数据库中存储的敏感数据是需要加密的，例如用户的密码。加密方法有对称加密和非对称加密，下面演示下对称加密的案例。
+
+### 1.封装加解密的函数
+
+```ts
+const Crypto=require('crypto-js')
+
+export const SECRET_KEY = 'Kinght'
+
+/**
+ * AES对称加密
+ * @param content 明文 
+ * @param key 密钥
+ * @returns 加密结果
+ */
+export const encrpty = (content: string, key: string) => {
+  return Crypto.AES.encrypt(content,key).toString()
+}
+
+/**
+ * AES解密
+ * @param encrptyStr 密文
+ * @param key 密钥
+ * @returns 解密内容
+ */
+export const decrpty = (encrptyStr: string,key:string) => {
+  return Crypto.AES.decrypt(encrptyStr,key).toString(Crypto.enc.Utf8)
+}
+```
+
+### 2.服务层在于数据库交互时，保存时加密数据，校验时解密数据
+
+```ts
+  async login({ username, password }: UserLoginDto) {
+    // 查询用户名是否存在
+    const user = await this.findUserByUsername(username)
+    if (user === null) {
+      throw new BadRequestException('用户名不存在!')
+    }
+    // 解密用户密码
+    const _password = decrpty(user.get('password'), SECRET_KEY)
+    if (_password === password) {
+      return user.get('user_id')
+    } else {
+      throw new BadRequestException('用户名或密码错误!')
+    }
+  }
+  async register({ username, password }: UserCreateDto) {
+    // 查询用户名是否有重复
+    if (await this.findUserByUsername(username)) {
+      throw new BadRequestException('用户名存在!')
+    }
+    // 加密密钥
+    const encrptyStr = encrpty(password, SECRET_KEY)
+    // 保存用户信息
+    // @ts-ignore
+    const user = await this.userRepository.create({
+      username,
+      password: encrptyStr
+    })
+    return user
+  }
+```
+
+## 5.一对多
+
+文章---用户，（一个用户对应多个文章，一个文章属于一个用户）
+
+用户模型
+
+```ts
+import { Column, Comment, Model, Table, PrimaryKey, AutoIncrement, DataType, NotNull, Default, HasMany } from 'sequelize-typescript';
+import { Post } from '../post/post.model';
+
+/**
+ * 用户模型
+ */
+@Table({
+  modelName: 'user',
+  tableName: 'user'
+})
+export class User extends Model<User> {
+  // colunm装饰器必须在最下面，否则一直报错
+  @PrimaryKey
+  @AutoIncrement
+  @Comment('用户id')
+  @Column(DataType.INTEGER)
+  user_id: number;
+
+  @Comment('用户名称')
+  @Column
+  username: string;
+
+  @Comment('用户密码')
+  @Column
+  password: string;
+
+  @Column
+  updatedAt: Date;
+
+  @Column
+  createdAt: Date;
+
+  @Default("User")
+  @Comment("用户角色")
+  @Column({
+    type: DataType.ENUM('Admin', "User")
+  })
+  role: "Admin" | "User"
+  // 一个用户有多个文章
+  @HasMany(() => Post)
+  posts: Post[]
+
+}
+
+
+
+```
+
+帖子模型
+
+```ts
+import { AutoIncrement, Column, Model, PrimaryKey, Table, Comment, DataType, BelongsTo, ForeignKey } from "sequelize-typescript";
+import { User } from "../user/user.model";
+
+@Table({
+  tableName: 'post'
+})
+export class Post extends Model<Post>{
+  @AutoIncrement
+  @Comment('文章id')
+  @PrimaryKey
+  @Column(DataType.INTEGER)
+  pid: number;
+
+  @Comment('帖子标题')
+  @Column(DataType.STRING)
+  title: string;
+
+  @Comment('帖子内容')
+  @Column(DataType.TEXT)
+  content: string;
+
+  // 创建的user外键,(自动引用User模型的主键)
+  @ForeignKey(() => User)
+  @Column
+  uid: number;
+   
+  // 一个文章属于一个用户
+  @BelongsTo(() => User)
+  user: User
+}
+```
+
+## 6.多对多
+
+一个用户可以点赞多个帖子，一个帖子可以被多个用户点赞
+
+### 创建联系模型
+
+```ts
+import { Column, ForeignKey, Model, Table } from "sequelize-typescript";
+import { User } from "../user/user.model";
+import { Post } from "./post.model";
+
+@Table({
+  tableName: "post_like"
+})
+export class PostLike extends Model<PostLike> {
+  @ForeignKey(() => User)
+  @Column
+  uid: number
+
+  @ForeignKey(() => Post)
+  @Column
+  pid: number
+}
+```
+
+### 建立连接
+
+post
+
+```ts
+import { AutoIncrement, Column, Model, PrimaryKey, Table, Comment, DataType, BelongsTo, ForeignKey, BelongsToMany } from "sequelize-typescript";
+import { User } from "../user/user.model";
+import { PostLike } from "./postLike.model";
+
+@Table({
+  tableName: 'post'
+})
+export class Post extends Model<Post>{
+  @AutoIncrement
+  @Comment('文章id')
+  @PrimaryKey
+  @Column(DataType.INTEGER)
+  pid: number;
+
+  @Comment('帖子标题')
+  @Column(DataType.STRING)
+  title: string;
+
+  @Comment('帖子内容')
+  @Column(DataType.TEXT)
+  content: string;
+
+  // 创建的user外键,(自动引用User模型的主键)
+  @ForeignKey(() => User)
+  @Column
+  uid: number;
+  // 一个文章属于一个用户
+  @BelongsTo(() => User)
+  user: User
+  // 一个帖子可以被多个用户点赞
+  @BelongsToMany(() => User, () => PostLike)
+  liked: User[];
+}
+```
+
+user
+
+```ts
+import { Column, Comment, Model, Table, PrimaryKey, AutoIncrement, DataType, NotNull, Default, HasMany, BelongsToMany } from 'sequelize-typescript';
+import { Post } from '../post/post.model';
+import { PostLike } from '../post/postLike.model';
+
+/**
+ * 用户模型
+ */
+@Table({
+  modelName: 'user',
+  tableName: 'user'
+})
+export class User extends Model<User> {
+  // colunm装饰器必须在最下面，否则一直报错
+  @PrimaryKey
+  @AutoIncrement
+  @Comment('用户id')
+  @Column(DataType.INTEGER)
+  user_id: number;
+
+  @Comment('用户名称')
+  @Column
+  username: string;
+
+  @Comment('用户密码')
+  @Column
+  password: string;
+
+  @Column
+  updatedAt: Date;
+
+  @Column
+  createdAt: Date;
+
+  @Default("User")
+  @Comment("用户角色")
+  @Column({
+    type: DataType.ENUM('Admin', "User")
+  })
+  role: "Admin" | "User"
+  // 一个用户有多个文章
+  @HasMany(() => Post)
+  posts: Post[]
+
+  // 一个用户可以点赞多个帖子
+  @BelongsToMany(() => Post, () => PostLike)
+  likePostList: Post[];
+}
+
+```
+
+### 最后
+
+不要忘记创建联系表哟~~~
+
+```ts
+ // 添加模型
+      sequelize.addModels([
+        User,Post,PostLike
+      ])
+```
 
 # 四、模块
 
@@ -1875,3 +2805,266 @@ export class CatsModule {}
 ```
 
 `@Global` 装饰器使模块成为全局作用域。 全局模块应该只注册一次，最好由根或核心模块注册。 在上面的例子中，`CatsService` 组件将无处不在，而想要使用 `CatsService` 的模块则不需要在 `imports` 数组中导入 `CatsModule`。
+
+
+
+## 简单示例
+
+在模块中通过Provider提供内容，通过export导出提供的内容，外部模块通过import导入模块，获得提供的内容，在外部模块中就可以注入模块中提供的内容了。
+
+### 1.声明提供者
+
+```ts
+import { Provider } from "@nestjs/common";
+
+export const PostProvider: Provider[] = [
+  {
+    provide: 'Hello',
+    useValue: [
+      {
+        title: '帖子标题',
+        content:'帖子内容111'
+      }
+    ]
+  }
+]
+```
+
+### 2.模块提供、模块导出
+
+```ts
+import { Module } from "@nestjs/common";
+import { PostProvider } from "./post.provider";
+
+@Module({
+  providers: [...PostProvider],
+  exports:[...PostProvider]
+})
+export class PostModule {}
+```
+
+### 3.模块导入
+
+```ts
+import { MiddlewareConsumer, Module, NestModule, RequestMethod } from "@nestjs/common";
+import { UserService } from "./user.service";
+import { UserController } from "./user.controller";
+import { userProviders } from "./user.providers";
+import { JwtModule } from '@nestjs/jwt'
+import { SECRET_KEY } from "src/utils/encrpty";
+import { TokenParseMiddleware } from "src/middleware/token";
+import { PostModule } from "../post/post.module";
+
+@Module({
+  imports: [
+    PostModule,
+  ]
+  // ....
+})
+export class UserModule {}
+```
+
+### 4.提供注入
+
+```ts
+@Controller('user')
+export class UserController {
+  constructor(
+    private userService: UserService,
+    // 注入Hello
+    @Inject('Hello') private postList:any[]
+  ) { }
+  @Get('list')
+  async getUserList() {
+    console.log(this.postList)
+    return await this.userService.findAll()
+  }
+}
+```
+
+
+
+# 五、集成SwaggerUI
+
+https://juejin.cn/post/7218926048242663484
+
+## 1.开启Swagger服务
+
+```ts
+import { NestApplication } from '@nestjs/core';
+import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+
+export const SwaggerDOC = (app: NestApplication) => {
+  /* 启动swagger */
+  const options = new DocumentBuilder()
+    .addBearerAuth() // 开启 BearerAuth 授权认证
+    .setTitle('API 文档') // 项目名称
+    .setDescription('API 文档') // 项目描述
+    .setTermsOfService('https://docs.nestjs.cn/8/introduction')
+    .setVersion('0.0.1')
+    .build();
+  const document = SwaggerModule.createDocument(app, options);
+  // 文档路径
+  SwaggerModule.setup('/doc/swagger-api', app, document);
+}
+```
+
+## 2.模块ApiTags
+
+使用ApiTags这个装饰器来给文档声明路由模块。
+
+```ts
+@ApiTags("文章模块")
+@Controller('post')
+export class PostController {}
+```
+
+## 3.描述ApiOperation
+
+ApiOperation可以用来描述一个接口的功能
+
+```ts
+  @ApiOperation({
+    summary: '创建帖子',
+    description:'拥有权限的用户可以创建帖子'
+  })
+  @UseGuards(AuthGuard)
+  @Post('create')
+  createPost() {
+    
+  }
+```
+
+## 4.参数描述ApiProperty
+
+```ts
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { Length, IsNotEmpty, IsString } from "class-validator";
+
+export class PostCreateDto {
+  @ApiProperty({
+    description: '文章标题',
+    type: String,
+    example: "我是标题!",
+    maxLength: 15,
+    minLength: 3
+  })
+  @Length(3, 15, { message: '文章标题长度为3-15个字符!' })
+  @IsNotEmpty({ message: '标题长度不能为空' })
+  readonly title: string;
+
+  @ApiProperty({
+    description: '文章内容',
+    type: String,
+    example: "我是文章内容",
+    maxLength: 9999,
+    minLength: 1
+  })
+  @Length(1, 9999, { message: '文章内容长度为1-99个字符!' })
+  @IsNotEmpty({ message: '文章内容长度不能为空' })
+  readonly content: string;
+  
+  // 可选参数
+  // @ApiPropertyOptional()
+}
+```
+
+## 5.响应描述ApiResponse 
+
+先声明响应的Dto
+
+```ts
+import { ApiProperty } from "@nestjs/swagger";
+
+export class PostCreateResponseDto {
+  @ApiProperty({
+    description: '文章标题',
+    type: String,
+    example: "我是标题!",
+  })
+  readonly title: string;
+
+  @ApiProperty({
+    description: '文章内容',
+    type: String,
+    example: "我是文章内容",
+  })
+  readonly content: string;
+  @ApiProperty({
+    description: '文章id',
+    type: Number,
+    example: "1"
+  })
+  pid: number;
+  @ApiProperty({
+    description: '用户id，文章作者的id',
+    type: Number,
+    example: "1"
+  })
+  uid: number;
+  @ApiProperty({
+    description: '更新时间',
+    type: Number,
+    example: "2023-09-03T10:34:51.212Z"
+  })
+  updatedAt: String;
+  @ApiProperty({
+    description: '创建时间',
+    type: Number,
+    example: "2023-09-03T10:34:51.212Z"
+  })
+  createdAt: String;
+}
+```
+
+声明响应结果类型定义
+
+```ts
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: '返回创建成功的帖子信息',
+    type: PostCreateResponseDto
+  })
+  @UseGuards(AuthGuard)
+  @Post('create')
+  createPost(@Body(new ValidationPipe()) postCreateDto:PostCreateDto) {
+    
+  }
+```
+
+## 6.请求头部ApiHeader
+
+```ts
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: '返回创建成功的帖子信息',
+    type: PostCreateResponseDto
+  })
+  @ApiHeader({
+    name: 'Authorization',
+    required: true,
+    description: '携带token，校验用户角色'
+  })
+  @Roles("Admin")
+  @UseGuards(AuthGuard, RoleGuard)
+  @Post('create')
+  createPost(@Body(new ValidationPipe()) postCreateDto: PostCreateDto, @Token() token: TokenParse) {
+    return this.postService.create(token.sub, postCreateDto)
+  }
+```
+
+### 7.路径参数ApiParam、查询参数ApiQuery
+
+```ts
+  @ApiParam({
+    description: '帖子id',
+    type: Number,
+    example: 0,
+    name: 'pid'
+  })
+  @Get('find/:pid')
+  findPost(@Param('pid', ParseIntPipe) pid: number) {
+    return this.postService.find(pid)
+  }
+```
+
